@@ -28,8 +28,8 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 1e8);
 const startPos = new THREE.Vector3();
 WGS84_ELLIPSOID.getCartographicToPosition(
-  5.017750 * Math.PI / 180,   // lat in radians
-  118.276007 * Math.PI / 180, // lon in radians
+  5.061014 * Math.PI / 180,   // lat in radians
+  118.220144 * Math.PI / 180, // lon in radians
   500,                         // 500m above ground
   startPos
 );
