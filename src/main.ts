@@ -61,14 +61,19 @@ tilesRenderer.registerPlugin(new GLTFExtensionsPlugin({ dracoLoader }));
 tilesRenderer.registerPlugin(new TileCompressionPlugin());
 tilesRenderer.registerPlugin(new TilesFadePlugin());
 
+// Wrapper group: we transform THIS for VR, leaving tilesRenderer.group untouched
+// so the library can manage its own internal transforms
+const vrContainer = new THREE.Group();
+vrContainer.add(tilesRenderer.group);
+scene.add(vrContainer);
+
 tilesRenderer.setCamera(camera);
 tilesRenderer.setResolutionFromRenderer(camera, renderer);
-scene.add(tilesRenderer.group);
 
 // --- Desktop Controls ---
 const controls = new GlobeControls(scene, camera, renderer.domElement, tilesRenderer);
 
-// --- VR Precomputed values ---
+// --- VR ---
 let inVR = false;
 const flySpeed = 20;
 
@@ -76,61 +81,37 @@ const flySpeed = 20;
 const startECEF = new THREE.Vector3();
 WGS84_ELLIPSOID.getCartographicToPosition(START_LAT, START_LON, START_ALT, startECEF);
 
-// Surface normal at start (= "up" direction on Earth at that point)
+// Surface normal at start = "up" on Earth
 const surfaceNormal = startECEF.clone().normalize();
 
-// Rotation to align surface normal with Y-up
+// Rotation: align surface normal with VR Y-up
 const alignQuat = new THREE.Quaternion().setFromUnitVectors(surfaceNormal, new THREE.Vector3(0, 1, 0));
 
-// User movement state
+// User movement
 const vrUserOffset = new THREE.Vector3();
 let vrYaw = 0;
 
-// --- Debug: red cube at VR origin so we can see if transform works ---
-const debugCube = new THREE.Mesh(
-  new THREE.BoxGeometry(50, 50, 50),
-  new THREE.MeshBasicMaterial({ color: 0xff0000 })
-);
-debugCube.visible = false;
-scene.add(debugCube);
-
-function updateWorldForVR() {
-  const group = tilesRenderer.group;
-
-  // The tiles live in ECEF space inside the group.
-  // XR camera is at world origin (0,0,0).
-  // We need: group transforms ECEF so that startECEF -> (0,0,0) in world.
-  //
-  // For a point P_ecef in the group:
-  //   P_world = group.quaternion * P_ecef + group.position
-  //
-  // We want P_world = (0,0,0) when P_ecef = startECEF:
-  //   0 = alignQuat * startECEF + group.position
-  //   group.position = -(alignQuat * startECEF)
-
-  // Combine user yaw with the surface alignment
+function updateVRContainer() {
+  // Combine alignment rotation with user yaw
   const yawQuat = new THREE.Quaternion().setFromAxisAngle(
     new THREE.Vector3(0, 1, 0), -vrYaw
   );
-  const totalQuat = yawQuat.clone().multiply(alignQuat);
+  const totalQuat = yawQuat.multiply(alignQuat);
 
-  group.quaternion.copy(totalQuat);
+  vrContainer.quaternion.copy(totalQuat);
 
-  // Position: negate the rotated ECEF start position, then add user offset
-  group.position.copy(startECEF).applyQuaternion(totalQuat).negate();
-  group.position.sub(vrUserOffset);
-
-  group.updateMatrixWorld(true);
+  // Position: rotate startECEF by totalQuat, negate it, then subtract user offset
+  vrContainer.position.copy(startECEF).applyQuaternion(totalQuat).negate();
+  vrContainer.position.sub(vrUserOffset);
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
   inVR = true;
   controls.enabled = false;
-  debugCube.visible = true;
 
   vrUserOffset.set(0, 0, 0);
   vrYaw = 0;
-  updateWorldForVR();
+  updateVRContainer();
 
   const xrCamera = renderer.xr.getCamera();
   tilesRenderer.setCamera(xrCamera);
@@ -140,13 +121,10 @@ renderer.xr.addEventListener('sessionstart', () => {
 renderer.xr.addEventListener('sessionend', () => {
   inVR = false;
   controls.enabled = true;
-  debugCube.visible = false;
 
-  const group = tilesRenderer.group;
-  group.position.set(0, 0, 0);
-  group.quaternion.identity();
-  group.scale.set(1, 1, 1);
-  group.updateMatrixWorld(true);
+  // Reset container
+  vrContainer.position.set(0, 0, 0);
+  vrContainer.quaternion.identity();
 
   tilesRenderer.setCamera(camera);
   tilesRenderer.setResolutionFromRenderer(camera, renderer);
@@ -171,7 +149,7 @@ function handleVRMovement() {
     }
   }
 
-  updateWorldForVR();
+  updateVRContainer();
 }
 
 // --- Resize ---
