@@ -145,7 +145,7 @@ function updateFlythrough() {
   if (!flyActive) return;
 
   // Fly forward along the terrain at constant altitude
-  const speed = Math.max(flyAltitude * 0.3, 30); // meters per frame
+  const speed = Math.max(flyAltitude * 3, 200); // meters per frame - fast scenic flight
   flyDistance += speed;
 
   // Move along the Earth surface in flyDirection
