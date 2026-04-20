@@ -3,6 +3,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import {
   TilesRenderer,
   GlobeControls,
+  WGS84_ELLIPSOID,
 } from '3d-tiles-renderer';
 import {
   CesiumIonAuthPlugin,
@@ -23,9 +24,16 @@ document.body.appendChild(renderer.domElement);
 // --- Scene ---
 const scene = new THREE.Scene();
 
-// --- Camera ---
+// --- Camera: start above 4.967290, 118.196778 (Sabah, Malaysia) ---
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 1e8);
-camera.position.set(4800000, 2570000, 14720000);
+const startPos = new THREE.Vector3();
+WGS84_ELLIPSOID.getCartographicToPosition(
+  4.967290 * Math.PI / 180,   // lat in radians
+  118.196778 * Math.PI / 180, // lon in radians
+  50000,                       // 50km above ground
+  startPos
+);
+camera.position.copy(startPos);
 camera.lookAt(0, 0, 0);
 
 // --- Lighting ---
