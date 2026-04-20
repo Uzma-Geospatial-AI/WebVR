@@ -15,7 +15,7 @@ const DEG2RAD = Math.PI / 180;
 // Starting location: Kuala Lumpur, 300m above ground
 const START_LAT = 3.1398 * DEG2RAD;
 const START_LON = 101.6878 * DEG2RAD;
-const START_ALT = 3000; // 3km above ground
+const START_ALT = 50000; // 50km above ground
 
 // --- Renderer ---
 const renderer = new THREE.WebGLRenderer({ antialias: true });
