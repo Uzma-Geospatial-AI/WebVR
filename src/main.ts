@@ -1,8 +1,13 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
-import { TilesRenderer } from '3d-tiles-renderer';
-import { CesiumIonAuthPlugin } from '3d-tiles-renderer/plugins';
-import { GlobeControls } from '3d-tiles-renderer';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { TilesRenderer, GlobeControls } from '3d-tiles-renderer';
+import {
+  CesiumIonAuthPlugin,
+  TileCompressionPlugin,
+  GLTFExtensionsPlugin,
+  TilesFadePlugin,
+} from '3d-tiles-renderer/plugins';
 
 const CESIUM_ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
 
@@ -11,7 +16,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.xr.enabled = true;
-renderer.sortObjects = false;
+renderer.setClearColor(0x87ceeb); // sky blue background
 document.body.appendChild(renderer.domElement);
 document.body.appendChild(VRButton.createButton(renderer));
 
@@ -25,9 +30,13 @@ const camera = new THREE.PerspectiveCamera(
   1,
   1e8
 );
+// Position camera above Earth looking down (ECEF coordinates)
+// Roughly above Kuala Lumpur: lat ~3.1, lon ~101.7
+camera.position.set(4800000, 2570000, 14720000);
+camera.lookAt(0, 0, 0);
 
 // --- Lighting ---
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
 scene.add(ambientLight);
 
 const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
@@ -37,13 +46,18 @@ scene.add(dirLight);
 // --- 3D Tiles: Google Photorealistic via Cesium Ion ---
 const tilesRenderer = new TilesRenderer();
 
-tilesRenderer.registerPlugin(
-  new CesiumIonAuthPlugin({
-    apiToken: CESIUM_ION_TOKEN,
-    assetId: '2275207', // Google Photorealistic 3D Tiles
-    autoRefreshToken: true,
-  })
-);
+// Draco decoder for compressed geometry
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+
+tilesRenderer.registerPlugin(new CesiumIonAuthPlugin({
+  apiToken: CESIUM_ION_TOKEN,
+  assetId: '2275207',
+  autoRefreshToken: true,
+}));
+tilesRenderer.registerPlugin(new GLTFExtensionsPlugin({ dracoLoader }));
+tilesRenderer.registerPlugin(new TileCompressionPlugin());
+tilesRenderer.registerPlugin(new TilesFadePlugin());
 
 tilesRenderer.setCamera(camera);
 tilesRenderer.setResolutionFromRenderer(camera, renderer);
