@@ -8,7 +8,6 @@ export default defineConfig({
     outDir: 'dist',
   },
   server: {
-    // WebXR requires HTTPS even on localhost
-    https: true,
+    host: true,
   },
 });
