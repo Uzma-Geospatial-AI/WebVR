@@ -1,10 +1,8 @@
 import * as THREE from 'three';
-import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import {
   TilesRenderer,
   GlobeControls,
-  Scheduler,
 } from '3d-tiles-renderer';
 import {
   CesiumIonAuthPlugin,
@@ -20,21 +18,15 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000011);
-renderer.xr.enabled = true;
 document.body.appendChild(renderer.domElement);
 
 // --- Scene ---
 const scene = new THREE.Scene();
 
-// --- Workspace (VR camera rig) ---
-const workspace = new THREE.Group();
-scene.add(workspace);
-
 // --- Camera ---
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 1e8);
 camera.position.set(4800000, 2570000, 14720000);
 camera.lookAt(0, 0, 0);
-workspace.add(camera);
 
 // --- Lighting ---
 scene.add(new THREE.AmbientLight(0xffffff, 1.0));
@@ -60,150 +52,125 @@ scene.add(tiles.group);
 tiles.setCamera(camera);
 tiles.setResolutionFromRenderer(camera, renderer);
 
-// --- Desktop Controls ---
+// --- Globe Controls (mouse/touch) ---
 const controls = new GlobeControls(scene, camera, renderer.domElement, tiles);
 
-// --- VR button ---
-document.body.appendChild(VRButton.createButton(renderer));
-
-// --- VR State ---
-let xrSession: XRSession | null = null;
-let inVR = false;
-let desktopCamPos = new THREE.Vector3();
-let desktopCamQuat = new THREE.Quaternion();
-
-// VR orbit state: spherical coordinates around Earth center
-let vrRadius = 15_000_000; // distance from Earth center (start in space)
-let vrTheta = 1.0;         // polar angle (0=north pole, PI=south pole)
-let vrPhi = 1.8;           // azimuthal angle
-
-const MIN_RADIUS = 7_500_000; // ~1100km above surface, safe from float issues
-const MAX_RADIUS = 30_000_000;
-
-function updateWorkspaceFromOrbit() {
-  // Convert spherical to cartesian
-  const x = vrRadius * Math.sin(vrTheta) * Math.cos(vrPhi);
-  const y = vrRadius * Math.cos(vrTheta);
-  const z = vrRadius * Math.sin(vrTheta) * Math.sin(vrPhi);
-
-  workspace.position.set(x, y, z);
-  workspace.lookAt(0, 0, 0);
-}
-
-function handleCamera() {
-  if (renderer.xr.isPresenting) {
-    if (xrSession === null) {
-      const xrCamera = renderer.xr.getCamera();
-      tiles.cameras.forEach((c) => tiles.deleteCamera(c));
-      tiles.setCamera(xrCamera);
-
-      const leftCam = xrCamera.cameras[0];
-      if (leftCam) {
-        tiles.setResolution(xrCamera, leftCam.viewport.z, leftCam.viewport.w);
-      }
-
-      xrSession = renderer.xr.getSession();
-      Scheduler.setXRSession(xrSession!);
-    }
+// --- Fullscreen button ---
+const fsBtn = document.createElement('button');
+fsBtn.textContent = 'FULLSCREEN';
+fsBtn.style.cssText = `
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  padding: 12px 24px; font-size: 18px; font-weight: bold;
+  background: #333; color: #fff; border: 1px solid #fff;
+  border-radius: 4px; cursor: pointer; z-index: 999;
+`;
+fsBtn.addEventListener('click', () => {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen();
   } else {
-    if (xrSession !== null) {
-      tiles.cameras.forEach((c) => tiles.deleteCamera(c));
-      tiles.setCamera(camera);
-      tiles.setResolutionFromRenderer(camera, renderer);
-      xrSession = null;
-      Scheduler.setXRSession(null as unknown as XRSession);
-    }
+    document.exitFullscreen();
   }
+});
+document.body.appendChild(fsBtn);
+
+document.addEventListener('fullscreenchange', () => {
+  fsBtn.style.display = document.fullscreenElement ? 'none' : 'block';
+});
+
+// --- Gamepad -> Synthetic pointer events for GlobeControls ---
+// Quest 2 browser: thumbpress = scroll (zoom) already works natively.
+// Thumbsticks: we simulate pointer drag events so GlobeControls responds.
+//   Left stick  = left-click drag  (pan / orbit)
+//   Right stick = right-click drag (tilt / rotate 3D view)
+const canvas = renderer.domElement;
+const canvasCx = () => window.innerWidth / 2;
+const canvasCy = () => window.innerHeight / 2;
+
+// Track simulated drag state for each stick
+let leftDragging = false;
+let rightDragging = false;
+let leftPos = { x: 0, y: 0 };
+let rightPos = { x: 0, y: 0 };
+
+function firePointer(type: string, x: number, y: number, button: number) {
+  const evt = new PointerEvent(type, {
+    clientX: x,
+    clientY: y,
+    button,
+    buttons: button === 0 ? 1 : 2,
+    pointerId: button === 0 ? 100 : 101,
+    pointerType: 'mouse',
+    bubbles: true,
+    cancelable: true,
+  });
+  canvas.dispatchEvent(evt);
 }
 
-renderer.xr.addEventListener('sessionstart', () => {
-  inVR = true;
-  controls.enabled = false;
+function handleGamepadSticks() {
+  const gamepads = navigator.getGamepads();
+  for (const gp of gamepads) {
+    if (!gp) continue;
 
-  desktopCamPos.copy(camera.position);
-  desktopCamQuat.copy(camera.quaternion);
-
-  // Initialize orbit from current camera position
-  vrRadius = camera.position.length();
-  vrTheta = Math.acos(camera.position.y / vrRadius);
-  vrPhi = Math.atan2(camera.position.z, camera.position.x);
-
-  camera.position.set(0, 0, 0);
-  camera.quaternion.identity();
-
-  updateWorkspaceFromOrbit();
-});
-
-renderer.xr.addEventListener('sessionend', () => {
-  inVR = false;
-  controls.enabled = true;
-
-  workspace.position.set(0, 0, 0);
-  workspace.quaternion.identity();
-  camera.position.copy(desktopCamPos);
-  camera.quaternion.copy(desktopCamQuat);
-});
-
-// --- VR Orbit Controls ---
-function handleVRControls() {
-  const session = renderer.xr.getSession();
-  if (!session) return;
-
-  for (const source of session.inputSources) {
-    if (!source.gamepad) continue;
-
-    const axes = source.gamepad.axes;
+    const axes = gp.axes;
     const dz = 0.15;
 
-    if (source.handedness === 'left') {
-      // Left stick: orbit around globe
-      // X = rotate east/west (phi), Y = rotate north/south (theta)
-      const lx = Math.abs(axes[2]) > dz ? axes[2] : 0;
-      const ly = Math.abs(axes[3]) > dz ? axes[3] : 0;
+    // Standard gamepad: axes[0]=LX, axes[1]=LY, axes[2]=RX, axes[3]=RY
+    const lx = Math.abs(axes[0]) > dz ? axes[0] : 0;
+    const ly = Math.abs(axes[1]) > dz ? axes[1] : 0;
+    const rx = Math.abs(axes[2]) > dz ? axes[2] : 0;
+    const ry = Math.abs(axes[3]) > dz ? axes[3] : 0;
 
-      if (lx !== 0) vrPhi -= lx * 0.02;
-      if (ly !== 0) {
-        vrTheta = Math.max(0.1, Math.min(Math.PI - 0.1, vrTheta + ly * 0.02));
-      }
-    } else if (source.handedness === 'right') {
-      // Right stick Y: zoom in/out (change radius)
-      const ry = Math.abs(axes[3]) > dz ? axes[3] : 0;
+    const dragSpeed = 3;
 
-      if (ry !== 0) {
-        const zoomFactor = 1 + ry * 0.02;
-        vrRadius = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, vrRadius * zoomFactor));
+    // --- Left stick -> left-click drag (pan/orbit) ---
+    if (lx !== 0 || ly !== 0) {
+      if (!leftDragging) {
+        leftPos.x = canvasCx();
+        leftPos.y = canvasCy();
+        firePointer('pointerdown', leftPos.x, leftPos.y, 0);
+        leftDragging = true;
       }
+      leftPos.x += lx * dragSpeed;
+      leftPos.y += ly * dragSpeed;
+      firePointer('pointermove', leftPos.x, leftPos.y, 0);
+    } else if (leftDragging) {
+      firePointer('pointerup', leftPos.x, leftPos.y, 0);
+      leftDragging = false;
+    }
+
+    // --- Right stick -> right-click drag (tilt/rotate) ---
+    if (rx !== 0 || ry !== 0) {
+      if (!rightDragging) {
+        rightPos.x = canvasCx();
+        rightPos.y = canvasCy();
+        firePointer('pointerdown', rightPos.x, rightPos.y, 2);
+        rightDragging = true;
+      }
+      rightPos.x += rx * dragSpeed;
+      rightPos.y += ry * dragSpeed;
+      firePointer('pointermove', rightPos.x, rightPos.y, 2);
+    } else if (rightDragging) {
+      firePointer('pointerup', rightPos.x, rightPos.y, 2);
+      rightDragging = false;
     }
   }
-
-  updateWorkspaceFromOrbit();
 }
+
+// Prevent context menu from right-click simulation
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // --- Resize ---
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  if (!inVR) tiles.setResolutionFromRenderer(camera, renderer);
+  tiles.setResolutionFromRenderer(camera, renderer);
 });
 
 // --- Render loop ---
 renderer.setAnimationLoop(() => {
-  handleCamera();
-
-  if (inVR) {
-    handleVRControls();
-    if (xrSession) {
-      const xrCamera = renderer.xr.getCamera();
-      const leftCam = xrCamera.cameras[0];
-      if (leftCam && leftCam.viewport) {
-        tiles.setResolution(xrCamera, leftCam.viewport.z, leftCam.viewport.w);
-      }
-    }
-  } else {
-    controls.update();
-  }
-
+  handleGamepadSticks();
+  controls.update();
   camera.updateMatrixWorld();
   tiles.update();
   renderer.render(scene, camera);
