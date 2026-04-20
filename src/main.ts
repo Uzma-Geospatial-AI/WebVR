@@ -22,7 +22,6 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setClearColor(0x000011);
 renderer.xr.enabled = true;
 document.body.appendChild(renderer.domElement);
-document.body.appendChild(VRButton.createButton(renderer));
 
 // --- Scene ---
 const scene = new THREE.Scene();
@@ -64,11 +63,32 @@ tiles.setResolutionFromRenderer(camera, renderer);
 // --- Desktop Controls ---
 const controls = new GlobeControls(scene, camera, renderer.domElement, tiles);
 
+// --- VR button ---
+document.body.appendChild(VRButton.createButton(renderer));
+
 // --- VR State ---
 let xrSession: XRSession | null = null;
 let inVR = false;
 let desktopCamPos = new THREE.Vector3();
 let desktopCamQuat = new THREE.Quaternion();
+
+// VR orbit state: spherical coordinates around Earth center
+let vrRadius = 15_000_000; // distance from Earth center (start in space)
+let vrTheta = 1.0;         // polar angle (0=north pole, PI=south pole)
+let vrPhi = 1.8;           // azimuthal angle
+
+const MIN_RADIUS = 7_500_000; // ~1100km above surface, safe from float issues
+const MAX_RADIUS = 30_000_000;
+
+function updateWorkspaceFromOrbit() {
+  // Convert spherical to cartesian
+  const x = vrRadius * Math.sin(vrTheta) * Math.cos(vrPhi);
+  const y = vrRadius * Math.cos(vrTheta);
+  const z = vrRadius * Math.sin(vrTheta) * Math.sin(vrPhi);
+
+  workspace.position.set(x, y, z);
+  workspace.lookAt(0, 0, 0);
+}
 
 function handleCamera() {
   if (renderer.xr.isPresenting) {
@@ -100,39 +120,34 @@ renderer.xr.addEventListener('sessionstart', () => {
   inVR = true;
   controls.enabled = false;
 
-  // Save desktop camera state
   desktopCamPos.copy(camera.position);
   desktopCamQuat.copy(camera.quaternion);
 
-  // Move workspace to current camera position, reset camera inside workspace
-  workspace.position.copy(camera.position);
-  workspace.quaternion.copy(camera.quaternion);
+  // Initialize orbit from current camera position
+  vrRadius = camera.position.length();
+  vrTheta = Math.acos(camera.position.y / vrRadius);
+  vrPhi = Math.atan2(camera.position.z, camera.position.x);
+
   camera.position.set(0, 0, 0);
   camera.quaternion.identity();
+
+  updateWorkspaceFromOrbit();
 });
 
 renderer.xr.addEventListener('sessionend', () => {
   inVR = false;
   controls.enabled = true;
 
-  // Restore desktop view
   workspace.position.set(0, 0, 0);
   workspace.quaternion.identity();
   camera.position.copy(desktopCamPos);
   camera.quaternion.copy(desktopCamQuat);
 });
 
-// --- VR Flight Controls ---
-function handleVRFlight() {
+// --- VR Orbit Controls ---
+function handleVRControls() {
   const session = renderer.xr.getSession();
   if (!session) return;
-
-  // Fly speed scales with distance to Earth center:
-  // far from Earth = fast, close to surface = slow
-  const distToCenter = workspace.position.length();
-  const earthRadius = 6_378_137;
-  const altitude = Math.max(distToCenter - earthRadius, 100);
-  const speed = altitude * 0.02; // 2% of altitude per frame
 
   for (const source of session.inputSources) {
     if (!source.gamepad) continue;
@@ -141,46 +156,27 @@ function handleVRFlight() {
     const dz = 0.15;
 
     if (source.handedness === 'left') {
-      // Left stick: fly forward/back (Y) and strafe left/right (X)
+      // Left stick: orbit around globe
+      // X = rotate east/west (phi), Y = rotate north/south (theta)
       const lx = Math.abs(axes[2]) > dz ? axes[2] : 0;
       const ly = Math.abs(axes[3]) > dz ? axes[3] : 0;
 
-      if (lx !== 0 || ly !== 0) {
-        const move = new THREE.Vector3(lx * speed, 0, ly * speed);
-        move.applyQuaternion(workspace.quaternion);
-        workspace.position.add(move);
+      if (lx !== 0) vrPhi -= lx * 0.02;
+      if (ly !== 0) {
+        vrTheta = Math.max(0.1, Math.min(Math.PI - 0.1, vrTheta + ly * 0.02));
       }
     } else if (source.handedness === 'right') {
-      // Right stick Y: move forward/back along look direction
+      // Right stick Y: zoom in/out (change radius)
       const ry = Math.abs(axes[3]) > dz ? axes[3] : 0;
-      // Right stick X: yaw rotation
-      const rx = Math.abs(axes[2]) > dz ? axes[2] : 0;
 
       if (ry !== 0) {
-        const fwd = new THREE.Vector3(0, 0, ry * speed);
-        fwd.applyQuaternion(workspace.quaternion);
-        workspace.position.add(fwd);
+        const zoomFactor = 1 + ry * 0.02;
+        vrRadius = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, vrRadius * zoomFactor));
       }
-      if (rx !== 0) {
-        workspace.rotateY(-rx * 0.03);
-      }
-    }
-
-    // Buttons: A/X = fly up, B/Y = fly down (relative to workspace up)
-    const buttons = source.gamepad.buttons;
-    if (buttons[4]?.pressed) {
-      // A or X button: ascend
-      const up = new THREE.Vector3(0, speed, 0);
-      up.applyQuaternion(workspace.quaternion);
-      workspace.position.add(up);
-    }
-    if (buttons[5]?.pressed) {
-      // B or Y button: descend
-      const down = new THREE.Vector3(0, -speed, 0);
-      down.applyQuaternion(workspace.quaternion);
-      workspace.position.add(down);
     }
   }
+
+  updateWorkspaceFromOrbit();
 }
 
 // --- Resize ---
@@ -196,7 +192,7 @@ renderer.setAnimationLoop(() => {
   handleCamera();
 
   if (inVR) {
-    handleVRFlight();
+    handleVRControls();
     if (xrSession) {
       const xrCamera = renderer.xr.getCamera();
       const leftCam = xrCamera.cameras[0];
