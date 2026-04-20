@@ -96,7 +96,7 @@ document.addEventListener('fullscreenchange', () => {
 
 // Fly Tour
 let flyActive = false;
-let flyAngle = 0;
+let flyDistance = 0;
 const flyBtn = document.createElement('button');
 flyBtn.textContent = 'FLY';
 flyBtn.style.cssText = btnStyle;
@@ -106,11 +106,27 @@ flyBtn.addEventListener('click', () => {
   flyBtn.style.background = flyActive ? '#c62828' : '#333';
 
   if (flyActive) {
-    // Capture the current look-at point as the orbit center
-    flyCenterECEF.copy(camera.position).normalize().multiplyScalar(earthRadius);
+    // Capture current position and heading
+    flyStartECEF.copy(camera.position).normalize().multiplyScalar(earthRadius);
     flyAltitude = camera.position.length() - earthRadius;
     if (flyAltitude < 200) flyAltitude = 200;
-    flyAngle = 0;
+    flyDistance = 0;
+
+    // Build local frame at camera position
+    const up = flyStartECEF.clone().normalize();
+    const tempEast = new THREE.Vector3(0, 1, 0).cross(up).normalize();
+    if (tempEast.length() < 0.01) tempEast.set(1, 0, 0).cross(up).normalize();
+    const tempNorth = up.clone().cross(tempEast).normalize();
+
+    // Get camera forward direction projected onto surface tangent plane
+    const camFwd = new THREE.Vector3();
+    camera.getWorldDirection(camFwd);
+    // Remove the up component to get horizontal heading
+    camFwd.addScaledVector(up, -camFwd.dot(up)).normalize();
+
+    flyDirection.copy(camFwd);
+    flyUp.copy(up);
+
     controls.enabled = false;
   } else {
     controls.enabled = true;
@@ -120,44 +136,46 @@ btnContainer.appendChild(flyBtn);
 
 // Fly state
 const earthRadius = 6_378_137;
-const flyCenterECEF = new THREE.Vector3();
+const flyStartECEF = new THREE.Vector3();
+const flyDirection = new THREE.Vector3();
+const flyUp = new THREE.Vector3();
 let flyAltitude = 500;
 
 function updateFlythrough() {
   if (!flyActive) return;
 
-  flyAngle += 0.002; // orbit speed
+  // Fly forward along the terrain at constant altitude
+  const speed = Math.max(flyAltitude * 0.3, 30); // meters per frame
+  flyDistance += speed;
 
-  // Build a local frame at flyCenterECEF
-  const up = flyCenterECEF.clone().normalize();
-  const east = new THREE.Vector3(0, 1, 0).cross(up).normalize();
-  if (east.length() < 0.01) east.set(1, 0, 0).cross(up).normalize();
-  const north = up.clone().cross(east).normalize();
+  // Move along the Earth surface in flyDirection
+  // New surface point = rotate startPoint around Earth center by the angle traveled
+  const angularDist = flyDistance / earthRadius; // radians traveled on surface
 
-  // Orbit radius on surface (how wide the circle is)
-  const orbitRadius = Math.max(flyAltitude * 2, 500);
+  // Great circle: new position on surface
+  const surfacePoint = new THREE.Vector3()
+    .copy(flyStartECEF)
+    .multiplyScalar(Math.cos(angularDist))
+    .addScaledVector(flyDirection, earthRadius * Math.sin(angularDist));
 
-  // Camera position: orbit around center at given altitude
-  const offset = new THREE.Vector3()
-    .addScaledVector(east, Math.cos(flyAngle) * orbitRadius)
-    .addScaledVector(north, Math.sin(flyAngle) * orbitRadius);
-
-  const surfacePoint = flyCenterECEF.clone().add(offset);
+  // Lift to altitude
   const surfaceNormal = surfacePoint.clone().normalize();
-  const camPos = surfaceNormal.multiplyScalar(earthRadius + flyAltitude);
-
+  const camPos = surfaceNormal.clone().multiplyScalar(earthRadius + flyAltitude);
   camera.position.copy(camPos);
 
-  // Look at a point slightly ahead on the orbit path + toward center
-  const lookAngle = flyAngle + 0.3;
-  const lookOffset = new THREE.Vector3()
-    .addScaledVector(east, Math.cos(lookAngle) * orbitRadius * 0.5)
-    .addScaledVector(north, Math.sin(lookAngle) * orbitRadius * 0.5);
-  const lookTarget = flyCenterECEF.clone().add(lookOffset);
-  const lookNormal = lookTarget.clone().normalize();
+  // Look ahead: point further along the path, at ground level
+  const lookAheadDist = (flyDistance + Math.max(flyAltitude * 3, 500)) / earthRadius;
+  const lookSurface = new THREE.Vector3()
+    .copy(flyStartECEF)
+    .multiplyScalar(Math.cos(lookAheadDist))
+    .addScaledVector(flyDirection, earthRadius * Math.sin(lookAheadDist));
+  const lookNormal = lookSurface.clone().normalize();
   const lookPoint = lookNormal.multiplyScalar(earthRadius);
 
   camera.lookAt(lookPoint);
+
+  // Keep camera level: set up vector to surface normal (no roll)
+  camera.up.copy(surfaceNormal);
 }
 
 // --- Gamepad -> Synthetic pointer events for GlobeControls ---
