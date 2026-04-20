@@ -12,10 +12,10 @@ import {
 const CESIUM_ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
 const DEG2RAD = Math.PI / 180;
 
-// Starting location: Kuala Lumpur, 300m above ground
+// Starting location: Kuala Lumpur
 const START_LAT = 3.1398 * DEG2RAD;
 const START_LON = 101.6878 * DEG2RAD;
-const START_ALT = 50000; // 50km above ground
+const START_ALT = 500;
 
 // --- Renderer ---
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -30,7 +30,7 @@ document.body.appendChild(VRButton.createButton(renderer));
 // --- Scene ---
 const scene = new THREE.Scene();
 
-// --- Camera (used for desktop view) ---
+// --- Camera (desktop) ---
 const camera = new THREE.PerspectiveCamera(
   60,
   window.innerWidth / window.innerHeight,
@@ -68,60 +68,65 @@ scene.add(tilesRenderer.group);
 // --- Desktop Controls ---
 const controls = new GlobeControls(scene, camera, renderer.domElement, tilesRenderer);
 
-// --- VR State ---
+// --- VR ---
 let inVR = false;
-const flySpeed = 50;
+const flySpeed = 20;
 
-// Compute where on Earth the user should start in VR (ECEF coordinates)
-const vrStartPos = new THREE.Vector3();
-WGS84_ELLIPSOID.getCartographicToPosition(START_LAT, START_LON, START_ALT, vrStartPos);
+// Get ECEF position of our start location
+const startECEF = new THREE.Vector3();
+WGS84_ELLIPSOID.getCartographicToPosition(START_LAT, START_LON, START_ALT, startECEF);
 
-// Get the ENU frame at start position (gives us local up/north/east)
-const enuMatrix = new THREE.Matrix4();
-WGS84_ELLIPSOID.getEastNorthUpFrame(START_LAT, START_LON, START_ALT, enuMatrix);
+// Get surface normal (points "up" from Earth surface at this location)
+const surfaceNormal = startECEF.clone().normalize();
 
-// Current VR offset from start position (in local ENU space)
-const vrOffset = new THREE.Vector3(0, 0, 0);
-const vrYaw = { value: 0 };
+// Build a rotation that aligns Earth's surface-up with world Y-up at the user's position.
+// This way, "down" in VR = toward Earth center, "up" = away from Earth.
+const upDir = new THREE.Vector3(0, 1, 0);
+const rotQuat = new THREE.Quaternion().setFromUnitVectors(surfaceNormal, upDir);
 
-// In VR, the XR camera is always near (0,0,0). So we move the WORLD (tilesRenderer.group)
-// so that the desired Earth location ends up at origin.
-function updateTilesGroupForVR() {
-  // Start with the ENU frame matrix (positions + orients at the Earth location)
-  const m = enuMatrix.clone();
+// VR user offset (accumulated from thumbstick input, in VR-local space)
+const vrUserOffset = new THREE.Vector3();
+let vrYaw = 0;
 
-  // Apply user's yaw rotation (around local Up axis)
-  const yawMatrix = new THREE.Matrix4().makeRotationAxis(
-    new THREE.Vector3(0, 1, 0),
-    vrYaw.value
-  );
+function updateWorldForVR() {
+  // Step 1: translate so startECEF maps to origin
+  // Step 2: rotate so surface normal aligns with Y-up
+  // Step 3: apply user offset (movement from thumbsticks)
 
-  // Apply user's position offset (in local ENU space)
+  const group = tilesRenderer.group;
+  group.matrixAutoUpdate = false;
+
+  // Build transform: first translate, then rotate, then offset
+  const m = new THREE.Matrix4();
+
+  // Translate: move the Earth so our start position is at origin
+  m.makeTranslation(-startECEF.x, -startECEF.y, -startECEF.z);
+
+  // Rotate: align surface normal with Y-up
+  const rotMatrix = new THREE.Matrix4().makeRotationFromQuaternion(rotQuat);
+  m.premultiply(rotMatrix);
+
+  // Apply user yaw
+  const yawMatrix = new THREE.Matrix4().makeRotationY(-vrYaw);
+  m.premultiply(yawMatrix);
+
+  // Apply user offset (translation in VR space)
   const offsetMatrix = new THREE.Matrix4().makeTranslation(
-    vrOffset.x, vrOffset.y, vrOffset.z
+    -vrUserOffset.x, -vrUserOffset.y, -vrUserOffset.z
   );
+  m.premultiply(offsetMatrix);
 
-  // Combined: where in ECEF the user currently "is"
-  // userWorldPos = enuMatrix * yawMatrix * offsetMatrix
-  const userMatrix = m.clone().multiply(yawMatrix).multiply(offsetMatrix);
-
-  // Invert: move the world so the user's position maps to origin
-  tilesRenderer.group.matrix.copy(userMatrix).invert();
-  tilesRenderer.group.matrixAutoUpdate = false;
+  group.matrix.copy(m);
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
   inVR = true;
   controls.enabled = false;
 
-  // Reset VR offset
-  vrOffset.set(0, 0, 0);
-  vrYaw.value = 0;
+  vrUserOffset.set(0, 0, 0);
+  vrYaw = 0;
+  updateWorldForVR();
 
-  // Position the tiles so Earth is around the user
-  updateTilesGroupForVR();
-
-  // Use XR camera for tile LOD
   const xrCamera = renderer.xr.getCamera();
   tilesRenderer.setCamera(xrCamera);
   tilesRenderer.setResolutionFromRenderer(xrCamera, renderer);
@@ -131,19 +136,17 @@ renderer.xr.addEventListener('sessionend', () => {
   inVR = false;
   controls.enabled = true;
 
-  // Restore tiles group transform
-  tilesRenderer.group.matrixAutoUpdate = true;
-  tilesRenderer.group.matrix.identity();
-  tilesRenderer.group.position.set(0, 0, 0);
-  tilesRenderer.group.rotation.set(0, 0, 0);
-  tilesRenderer.group.scale.set(1, 1, 1);
+  const group = tilesRenderer.group;
+  group.matrixAutoUpdate = true;
+  group.matrix.identity();
+  group.position.set(0, 0, 0);
+  group.rotation.set(0, 0, 0);
+  group.scale.set(1, 1, 1);
 
-  // Restore desktop camera
   tilesRenderer.setCamera(camera);
   tilesRenderer.setResolutionFromRenderer(camera, renderer);
 });
 
-// --- VR Controller Flight ---
 function handleVRMovement() {
   const session = renderer.xr.getSession();
   if (!session) return;
@@ -155,21 +158,21 @@ function handleVRMovement() {
     const deadzone = 0.15;
 
     if (source.handedness === 'left') {
-      // Left stick: forward/back (Z) and strafe (X)
-      if (Math.abs(axes[2]) > deadzone) vrOffset.x += axes[2] * flySpeed;
-      if (Math.abs(axes[3]) > deadzone) vrOffset.z += axes[3] * flySpeed;
+      // Left stick: forward/back and strafe
+      if (Math.abs(axes[2]) > deadzone) vrUserOffset.x += axes[2] * flySpeed;
+      if (Math.abs(axes[3]) > deadzone) vrUserOffset.z += axes[3] * flySpeed;
     } else if (source.handedness === 'right') {
       // Right stick Y: up/down
-      if (Math.abs(axes[3]) > deadzone) vrOffset.y -= axes[3] * flySpeed;
-      // Right stick X: yaw rotation
-      if (Math.abs(axes[2]) > deadzone) vrYaw.value += axes[2] * 0.02;
+      if (Math.abs(axes[3]) > deadzone) vrUserOffset.y -= axes[3] * flySpeed;
+      // Right stick X: yaw
+      if (Math.abs(axes[2]) > deadzone) vrYaw += axes[2] * 0.02;
     }
   }
 
-  updateTilesGroupForVR();
+  updateWorldForVR();
 }
 
-// --- Handle resize ---
+// --- Resize ---
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
