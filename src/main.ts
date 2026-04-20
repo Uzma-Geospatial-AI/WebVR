@@ -140,11 +140,12 @@ function enterVR() {
   workspace.quaternion.identity();
 
   // Transform tiles.group so Earth surface at KL = scene origin
-  // Step 1: negate ECEF to bring KL to origin
-  // Step 2: rotate so surface normal = Y-up
-  // We apply this on tiles.group directly since no getBoundingBox centering is needed
+  // Scale down to avoid GPU float precision issues (ECEF is millions of meters)
+  // Scale 0.01 = 1cm in scene per 1m real. Earth radius ~63km scene units.
+  const VR_SCALE = 0.01;
+  tiles.group.scale.setScalar(VR_SCALE);
   tiles.group.quaternion.copy(alignQuat);
-  const rotatedStart = new Vector3().copy(startECEF).applyQuaternion(alignQuat);
+  const rotatedStart = new Vector3().copy(startECEF).applyQuaternion(alignQuat).multiplyScalar(VR_SCALE);
   tiles.group.position.copy(rotatedStart).negate();
 }
 
@@ -164,6 +165,7 @@ function exitVR() {
   // Reset tiles.group
   tiles.group.position.set(0, 0, 0);
   tiles.group.quaternion.identity();
+  tiles.group.scale.set(1, 1, 1);
 }
 
 renderer.xr.addEventListener('sessionstart', enterVR);
