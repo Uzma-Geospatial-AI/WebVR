@@ -63,15 +63,24 @@ tiles.setResolutionFromRenderer(camera, renderer);
 // --- Globe Controls (mouse/touch) ---
 const controls = new GlobeControls(scene, camera, renderer.domElement, tiles);
 
-// --- Fullscreen button ---
+// --- Buttons ---
+const btnStyle = `
+  padding: 12px 24px; font-size: 16px; font-weight: bold;
+  background: #333; color: #fff; border: 1px solid #fff;
+  border-radius: 4px; cursor: pointer;
+`;
+
+const btnContainer = document.createElement('div');
+btnContainer.style.cssText = `
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 10px; z-index: 999;
+`;
+document.body.appendChild(btnContainer);
+
+// Fullscreen
 const fsBtn = document.createElement('button');
 fsBtn.textContent = 'FULLSCREEN';
-fsBtn.style.cssText = `
-  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-  padding: 12px 24px; font-size: 18px; font-weight: bold;
-  background: #333; color: #fff; border: 1px solid #fff;
-  border-radius: 4px; cursor: pointer; z-index: 999;
-`;
+fsBtn.style.cssText = btnStyle;
 fsBtn.addEventListener('click', () => {
   if (!document.fullscreenElement) {
     document.documentElement.requestFullscreen();
@@ -79,11 +88,77 @@ fsBtn.addEventListener('click', () => {
     document.exitFullscreen();
   }
 });
-document.body.appendChild(fsBtn);
+btnContainer.appendChild(fsBtn);
 
 document.addEventListener('fullscreenchange', () => {
-  fsBtn.style.display = document.fullscreenElement ? 'none' : 'block';
+  btnContainer.style.display = document.fullscreenElement ? 'none' : 'flex';
 });
+
+// Fly Tour
+let flyActive = false;
+let flyAngle = 0;
+const flyBtn = document.createElement('button');
+flyBtn.textContent = 'FLY';
+flyBtn.style.cssText = btnStyle;
+flyBtn.addEventListener('click', () => {
+  flyActive = !flyActive;
+  flyBtn.textContent = flyActive ? 'STOP' : 'FLY';
+  flyBtn.style.background = flyActive ? '#c62828' : '#333';
+
+  if (flyActive) {
+    // Capture the current look-at point as the orbit center
+    flyCenterECEF.copy(camera.position).normalize().multiplyScalar(earthRadius);
+    flyAltitude = camera.position.length() - earthRadius;
+    if (flyAltitude < 200) flyAltitude = 200;
+    flyAngle = 0;
+    controls.enabled = false;
+  } else {
+    controls.enabled = true;
+  }
+});
+btnContainer.appendChild(flyBtn);
+
+// Fly state
+const earthRadius = 6_378_137;
+const flyCenterECEF = new THREE.Vector3();
+let flyAltitude = 500;
+
+function updateFlythrough() {
+  if (!flyActive) return;
+
+  flyAngle += 0.002; // orbit speed
+
+  // Build a local frame at flyCenterECEF
+  const up = flyCenterECEF.clone().normalize();
+  const east = new THREE.Vector3(0, 1, 0).cross(up).normalize();
+  if (east.length() < 0.01) east.set(1, 0, 0).cross(up).normalize();
+  const north = up.clone().cross(east).normalize();
+
+  // Orbit radius on surface (how wide the circle is)
+  const orbitRadius = Math.max(flyAltitude * 2, 500);
+
+  // Camera position: orbit around center at given altitude
+  const offset = new THREE.Vector3()
+    .addScaledVector(east, Math.cos(flyAngle) * orbitRadius)
+    .addScaledVector(north, Math.sin(flyAngle) * orbitRadius);
+
+  const surfacePoint = flyCenterECEF.clone().add(offset);
+  const surfaceNormal = surfacePoint.clone().normalize();
+  const camPos = surfaceNormal.multiplyScalar(earthRadius + flyAltitude);
+
+  camera.position.copy(camPos);
+
+  // Look at a point slightly ahead on the orbit path + toward center
+  const lookAngle = flyAngle + 0.3;
+  const lookOffset = new THREE.Vector3()
+    .addScaledVector(east, Math.cos(lookAngle) * orbitRadius * 0.5)
+    .addScaledVector(north, Math.sin(lookAngle) * orbitRadius * 0.5);
+  const lookTarget = flyCenterECEF.clone().add(lookOffset);
+  const lookNormal = lookTarget.clone().normalize();
+  const lookPoint = lookNormal.multiplyScalar(earthRadius);
+
+  camera.lookAt(lookPoint);
+}
 
 // --- Gamepad -> Synthetic pointer events for GlobeControls ---
 // Quest 2 browser: thumbpress = scroll (zoom) already works natively.
@@ -178,6 +253,7 @@ window.addEventListener('resize', () => {
 // --- Render loop ---
 renderer.setAnimationLoop(() => {
   handleGamepadSticks();
+  updateFlythrough();
   controls.update();
   camera.updateMatrixWorld();
   tiles.update();
