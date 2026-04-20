@@ -12,7 +12,7 @@ import {
 const CESIUM_ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
 const DEG2RAD = Math.PI / 180;
 
-// Starting location: Kuala Lumpur
+// Starting location: Kuala Lumpur, 500m above ground
 const START_LAT = 3.1398 * DEG2RAD;
 const START_LON = 101.6878 * DEG2RAD;
 const START_ALT = 500;
@@ -68,60 +68,65 @@ scene.add(tilesRenderer.group);
 // --- Desktop Controls ---
 const controls = new GlobeControls(scene, camera, renderer.domElement, tilesRenderer);
 
-// --- VR ---
+// --- VR Precomputed values ---
 let inVR = false;
 const flySpeed = 20;
 
-// Get ECEF position of our start location
+// ECEF position of start location
 const startECEF = new THREE.Vector3();
 WGS84_ELLIPSOID.getCartographicToPosition(START_LAT, START_LON, START_ALT, startECEF);
 
-// Get surface normal (points "up" from Earth surface at this location)
+// Surface normal at start (= "up" direction on Earth at that point)
 const surfaceNormal = startECEF.clone().normalize();
 
-// Build a rotation that aligns Earth's surface-up with world Y-up at the user's position.
-// This way, "down" in VR = toward Earth center, "up" = away from Earth.
-const upDir = new THREE.Vector3(0, 1, 0);
-const rotQuat = new THREE.Quaternion().setFromUnitVectors(surfaceNormal, upDir);
+// Rotation to align surface normal with Y-up
+const alignQuat = new THREE.Quaternion().setFromUnitVectors(surfaceNormal, new THREE.Vector3(0, 1, 0));
 
-// VR user offset (accumulated from thumbstick input, in VR-local space)
+// User movement state
 const vrUserOffset = new THREE.Vector3();
 let vrYaw = 0;
 
+// --- Debug: red cube at VR origin so we can see if transform works ---
+const debugCube = new THREE.Mesh(
+  new THREE.BoxGeometry(50, 50, 50),
+  new THREE.MeshBasicMaterial({ color: 0xff0000 })
+);
+debugCube.visible = false;
+scene.add(debugCube);
+
 function updateWorldForVR() {
-  // Step 1: translate so startECEF maps to origin
-  // Step 2: rotate so surface normal aligns with Y-up
-  // Step 3: apply user offset (movement from thumbsticks)
-
   const group = tilesRenderer.group;
-  group.matrixAutoUpdate = false;
 
-  // Build transform: first translate, then rotate, then offset
-  const m = new THREE.Matrix4();
+  // The tiles live in ECEF space inside the group.
+  // XR camera is at world origin (0,0,0).
+  // We need: group transforms ECEF so that startECEF -> (0,0,0) in world.
+  //
+  // For a point P_ecef in the group:
+  //   P_world = group.quaternion * P_ecef + group.position
+  //
+  // We want P_world = (0,0,0) when P_ecef = startECEF:
+  //   0 = alignQuat * startECEF + group.position
+  //   group.position = -(alignQuat * startECEF)
 
-  // Translate: move the Earth so our start position is at origin
-  m.makeTranslation(-startECEF.x, -startECEF.y, -startECEF.z);
-
-  // Rotate: align surface normal with Y-up
-  const rotMatrix = new THREE.Matrix4().makeRotationFromQuaternion(rotQuat);
-  m.premultiply(rotMatrix);
-
-  // Apply user yaw
-  const yawMatrix = new THREE.Matrix4().makeRotationY(-vrYaw);
-  m.premultiply(yawMatrix);
-
-  // Apply user offset (translation in VR space)
-  const offsetMatrix = new THREE.Matrix4().makeTranslation(
-    -vrUserOffset.x, -vrUserOffset.y, -vrUserOffset.z
+  // Combine user yaw with the surface alignment
+  const yawQuat = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 1, 0), -vrYaw
   );
-  m.premultiply(offsetMatrix);
+  const totalQuat = yawQuat.clone().multiply(alignQuat);
 
-  group.matrix.copy(m);
+  group.quaternion.copy(totalQuat);
+
+  // Position: negate the rotated ECEF start position, then add user offset
+  group.position.copy(startECEF).applyQuaternion(totalQuat).negate();
+  group.position.sub(vrUserOffset);
+
+  group.updateMatrixWorld(true);
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
   inVR = true;
   controls.enabled = false;
+  debugCube.visible = true;
 
   vrUserOffset.set(0, 0, 0);
   vrYaw = 0;
@@ -135,13 +140,13 @@ renderer.xr.addEventListener('sessionstart', () => {
 renderer.xr.addEventListener('sessionend', () => {
   inVR = false;
   controls.enabled = true;
+  debugCube.visible = false;
 
   const group = tilesRenderer.group;
-  group.matrixAutoUpdate = true;
-  group.matrix.identity();
   group.position.set(0, 0, 0);
-  group.rotation.set(0, 0, 0);
+  group.quaternion.identity();
   group.scale.set(1, 1, 1);
+  group.updateMatrixWorld(true);
 
   tilesRenderer.setCamera(camera);
   tilesRenderer.setResolutionFromRenderer(camera, renderer);
@@ -158,13 +163,10 @@ function handleVRMovement() {
     const deadzone = 0.15;
 
     if (source.handedness === 'left') {
-      // Left stick: forward/back and strafe
       if (Math.abs(axes[2]) > deadzone) vrUserOffset.x += axes[2] * flySpeed;
       if (Math.abs(axes[3]) > deadzone) vrUserOffset.z += axes[3] * flySpeed;
     } else if (source.handedness === 'right') {
-      // Right stick Y: up/down
       if (Math.abs(axes[3]) > deadzone) vrUserOffset.y -= axes[3] * flySpeed;
-      // Right stick X: yaw
       if (Math.abs(axes[2]) > deadzone) vrYaw += axes[2] * 0.02;
     }
   }
