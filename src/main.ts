@@ -19,18 +19,19 @@ const CESIUM_ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setClearColor(0x87ceeb);
+renderer.setClearColor(0x000011);
 renderer.xr.enabled = true;
 document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
 
 // --- Scene ---
 const scene = new THREE.Scene();
 
-// --- Workspace (VR camera rig, same as official VR example) ---
+// --- Workspace (VR camera rig) ---
 const workspace = new THREE.Group();
 scene.add(workspace);
 
-// --- Camera (inside workspace) ---
+// --- Camera ---
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 1e8);
 camera.position.set(4800000, 2570000, 14720000);
 camera.lookAt(0, 0, 0);
@@ -42,7 +43,7 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
 dirLight.position.set(1, 2, 1).normalize();
 scene.add(dirLight);
 
-// --- 3D Tiles (NO transform - tiles stay in native ECEF) ---
+// --- 3D Tiles ---
 const tiles = new TilesRenderer();
 const dracoLoader = new DRACOLoader();
 dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
@@ -60,42 +61,10 @@ scene.add(tiles.group);
 tiles.setCamera(camera);
 tiles.setResolutionFromRenderer(camera, renderer);
 
-// --- Globe Controls ---
+// --- Desktop Controls ---
 const controls = new GlobeControls(scene, camera, renderer.domElement, tiles);
 
-// --- Buttons ---
-const btnContainer = document.createElement('div');
-btnContainer.style.cssText = `
-  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-  display: flex; gap: 10px; z-index: 999;
-`;
-document.body.appendChild(btnContainer);
-
-// Fullscreen button
-const fsBtn = document.createElement('button');
-fsBtn.textContent = 'FULLSCREEN';
-fsBtn.style.cssText = `
-  padding: 12px 24px; font-size: 18px; font-weight: bold;
-  background: #333; color: #fff; border: 1px solid #fff;
-  border-radius: 4px; cursor: pointer;
-`;
-fsBtn.addEventListener('click', () => {
-  if (!document.fullscreenElement) {
-    document.documentElement.requestFullscreen();
-  } else {
-    document.exitFullscreen();
-  }
-});
-btnContainer.appendChild(fsBtn);
-
-// VR button
-btnContainer.appendChild(VRButton.createButton(renderer));
-
-document.addEventListener('fullscreenchange', () => {
-  fsBtn.style.display = document.fullscreenElement ? 'none' : 'block';
-});
-
-// --- VR camera handling (exact pattern from official VR example) ---
+// --- VR State ---
 let xrSession: XRSession | null = null;
 let inVR = false;
 let desktopCamPos = new THREE.Vector3();
@@ -105,7 +74,6 @@ function handleCamera() {
   if (renderer.xr.isPresenting) {
     if (xrSession === null) {
       const xrCamera = renderer.xr.getCamera();
-
       tiles.cameras.forEach((c) => tiles.deleteCamera(c));
       tiles.setCamera(xrCamera);
 
@@ -136,9 +104,7 @@ renderer.xr.addEventListener('sessionstart', () => {
   desktopCamPos.copy(camera.position);
   desktopCamQuat.copy(camera.quaternion);
 
-  // In VR: keep camera at same position as desktop view
-  // The workspace holds the camera, so move workspace to where the camera was
-  // and reset camera to origin within workspace
+  // Move workspace to current camera position, reset camera inside workspace
   workspace.position.copy(camera.position);
   workspace.quaternion.copy(camera.quaternion);
   camera.position.set(0, 0, 0);
@@ -149,66 +115,70 @@ renderer.xr.addEventListener('sessionend', () => {
   inVR = false;
   controls.enabled = true;
 
-  // Restore desktop camera
+  // Restore desktop view
   workspace.position.set(0, 0, 0);
   workspace.quaternion.identity();
   camera.position.copy(desktopCamPos);
   camera.quaternion.copy(desktopCamQuat);
 });
 
-// --- Gamepad controls (works in both fullscreen and VR) ---
-function handleGamepad() {
-  const gamepads = navigator.getGamepads();
-  for (const gp of gamepads) {
-    if (!gp) continue;
+// --- VR Flight Controls ---
+function handleVRFlight() {
+  const session = renderer.xr.getSession();
+  if (!session) return;
 
-    const deadzone = 0.15;
-    const axes = gp.axes;
-    const lx = Math.abs(axes[0]) > deadzone ? axes[0] : 0;
-    const ly = Math.abs(axes[1]) > deadzone ? axes[1] : 0;
-    const rx = Math.abs(axes[2]) > deadzone ? axes[2] : 0;
-    const ry = Math.abs(axes[3]) > deadzone ? axes[3] : 0;
+  // Fly speed scales with distance to Earth center:
+  // far from Earth = fast, close to surface = slow
+  const distToCenter = workspace.position.length();
+  const earthRadius = 6_378_137;
+  const altitude = Math.max(distToCenter - earthRadius, 100);
+  const speed = altitude * 0.02; // 2% of altitude per frame
 
-    if (lx === 0 && ly === 0 && rx === 0 && ry === 0) continue;
+  for (const source of session.inputSources) {
+    if (!source.gamepad) continue;
 
-    if (inVR) {
-      // VR: move workspace (camera rig) through space
-      const flySpeed = 50000; // meters per frame at Earth scale
+    const axes = source.gamepad.axes;
+    const dz = 0.15;
+
+    if (source.handedness === 'left') {
+      // Left stick: fly forward/back (Y) and strafe left/right (X)
+      const lx = Math.abs(axes[2]) > dz ? axes[2] : 0;
+      const ly = Math.abs(axes[3]) > dz ? axes[3] : 0;
+
       if (lx !== 0 || ly !== 0) {
-        const move = new THREE.Vector3(lx * flySpeed, 0, ly * flySpeed);
+        const move = new THREE.Vector3(lx * speed, 0, ly * speed);
         move.applyQuaternion(workspace.quaternion);
         workspace.position.add(move);
       }
+    } else if (source.handedness === 'right') {
+      // Right stick Y: move forward/back along look direction
+      const ry = Math.abs(axes[3]) > dz ? axes[3] : 0;
+      // Right stick X: yaw rotation
+      const rx = Math.abs(axes[2]) > dz ? axes[2] : 0;
+
       if (ry !== 0) {
-        const fwd = new THREE.Vector3(0, 0, -ry * flySpeed);
+        const fwd = new THREE.Vector3(0, 0, ry * speed);
         fwd.applyQuaternion(workspace.quaternion);
         workspace.position.add(fwd);
       }
       if (rx !== 0) {
-        workspace.rotateY(-rx * 0.02);
+        workspace.rotateY(-rx * 0.03);
       }
-    } else {
-      // Fullscreen: orbit around globe
-      const orbitSpeed = 0.02;
-      if (lx !== 0 || ly !== 0) {
-        const camDir = new THREE.Vector3();
-        camera.getWorldDirection(camDir);
-        const right = new THREE.Vector3().crossVectors(camDir, camera.up).normalize();
-        const up = new THREE.Vector3().crossVectors(right, camDir).normalize();
-        const offset = new THREE.Vector3()
-          .addScaledVector(right, -lx * orbitSpeed * camera.position.length())
-          .addScaledVector(up, ly * orbitSpeed * camera.position.length());
-        camera.position.add(offset);
-        camera.lookAt(0, 0, 0);
-      }
-      if (ry !== 0) {
-        const dir = new THREE.Vector3().copy(camera.position).normalize();
-        camera.position.addScaledVector(dir, -ry * 0.02 * camera.position.length());
-      }
-      if (rx !== 0) {
-        camera.position.applyAxisAngle(new THREE.Vector3(0, 1, 0), -rx * 0.01);
-        camera.lookAt(0, 0, 0);
-      }
+    }
+
+    // Buttons: A/X = fly up, B/Y = fly down (relative to workspace up)
+    const buttons = source.gamepad.buttons;
+    if (buttons[4]?.pressed) {
+      // A or X button: ascend
+      const up = new THREE.Vector3(0, speed, 0);
+      up.applyQuaternion(workspace.quaternion);
+      workspace.position.add(up);
+    }
+    if (buttons[5]?.pressed) {
+      // B or Y button: descend
+      const down = new THREE.Vector3(0, -speed, 0);
+      down.applyQuaternion(workspace.quaternion);
+      workspace.position.add(down);
     }
   }
 }
@@ -224,18 +194,18 @@ window.addEventListener('resize', () => {
 // --- Render loop ---
 renderer.setAnimationLoop(() => {
   handleCamera();
-  handleGamepad();
 
-  if (!inVR) {
-    controls.update();
-  }
-
-  if (inVR && xrSession) {
-    const xrCamera = renderer.xr.getCamera();
-    const leftCam = xrCamera.cameras[0];
-    if (leftCam && leftCam.viewport) {
-      tiles.setResolution(xrCamera, leftCam.viewport.z, leftCam.viewport.w);
+  if (inVR) {
+    handleVRFlight();
+    if (xrSession) {
+      const xrCamera = renderer.xr.getCamera();
+      const leftCam = xrCamera.cameras[0];
+      if (leftCam && leftCam.viewport) {
+        tiles.setResolution(xrCamera, leftCam.viewport.z, leftCam.viewport.w);
+      }
     }
+  } else {
+    controls.update();
   }
 
   camera.updateMatrixWorld();
