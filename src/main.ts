@@ -12,10 +12,10 @@ import {
 const CESIUM_ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
 const DEG2RAD = Math.PI / 180;
 
-// --- Starting location: Kuala Lumpur ---
+// Starting location: Kuala Lumpur, 300m above ground
 const START_LAT = 3.1398 * DEG2RAD;
 const START_LON = 101.6878 * DEG2RAD;
-const START_ALT = 300; // meters above ground
+const START_ALT = 300;
 
 // --- Renderer ---
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -30,25 +30,18 @@ document.body.appendChild(VRButton.createButton(renderer));
 // --- Scene ---
 const scene = new THREE.Scene();
 
-// --- Camera ---
+// --- Camera (used for desktop view) ---
 const camera = new THREE.PerspectiveCamera(
   60,
   window.innerWidth / window.innerHeight,
   1,
   1e8
 );
-// Desktop: position above Earth
 camera.position.set(4800000, 2570000, 14720000);
 camera.lookAt(0, 0, 0);
 
-// --- VR Rig: a group we move around, camera lives inside it in XR ---
-const vrRig = new THREE.Group();
-scene.add(vrRig);
-
 // --- Lighting ---
-const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
-scene.add(ambientLight);
-
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
 const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
 dirLight.position.set(1, 2, 1).normalize();
 scene.add(dirLight);
@@ -72,34 +65,63 @@ tilesRenderer.setCamera(camera);
 tilesRenderer.setResolutionFromRenderer(camera, renderer);
 scene.add(tilesRenderer.group);
 
-// --- Globe Controls (desktop only) ---
+// --- Desktop Controls ---
 const controls = new GlobeControls(scene, camera, renderer.domElement, tilesRenderer);
 
 // --- VR State ---
 let inVR = false;
-const flySpeed = 50; // meters per frame (~3 km/min at 60fps)
+const flySpeed = 50;
 
-// Position the VR rig on Earth's surface at the start location
-function positionVRRig(lat: number, lon: number, alt: number) {
-  const position = new THREE.Vector3();
-  WGS84_ELLIPSOID.getCartographicToPosition(lat, lon, alt, position);
+// Compute where on Earth the user should start in VR (ECEF coordinates)
+const vrStartPos = new THREE.Vector3();
+WGS84_ELLIPSOID.getCartographicToPosition(START_LAT, START_LON, START_ALT, vrStartPos);
 
-  // Get the ENU (East-North-Up) frame at this location
-  const enuMatrix = new THREE.Matrix4();
-  WGS84_ELLIPSOID.getEastNorthUpFrame(lat, lon, alt, enuMatrix);
+// Get the ENU frame at start position (gives us local up/north/east)
+const enuMatrix = new THREE.Matrix4();
+WGS84_ELLIPSOID.getEastNorthUpFrame(START_LAT, START_LON, START_ALT, enuMatrix);
 
-  vrRig.position.copy(position);
-  vrRig.rotation.setFromRotationMatrix(enuMatrix);
+// Current VR offset from start position (in local ENU space)
+const vrOffset = new THREE.Vector3(0, 0, 0);
+const vrYaw = { value: 0 };
+
+// In VR, the XR camera is always near (0,0,0). So we move the WORLD (tilesRenderer.group)
+// so that the desired Earth location ends up at origin.
+function updateTilesGroupForVR() {
+  // Start with the ENU frame matrix (positions + orients at the Earth location)
+  const m = enuMatrix.clone();
+
+  // Apply user's yaw rotation (around local Up axis)
+  const yawMatrix = new THREE.Matrix4().makeRotationAxis(
+    new THREE.Vector3(0, 1, 0),
+    vrYaw.value
+  );
+
+  // Apply user's position offset (in local ENU space)
+  const offsetMatrix = new THREE.Matrix4().makeTranslation(
+    vrOffset.x, vrOffset.y, vrOffset.z
+  );
+
+  // Combined: where in ECEF the user currently "is"
+  // userWorldPos = enuMatrix * yawMatrix * offsetMatrix
+  const userMatrix = m.clone().multiply(yawMatrix).multiply(offsetMatrix);
+
+  // Invert: move the world so the user's position maps to origin
+  tilesRenderer.group.matrix.copy(userMatrix).invert();
+  tilesRenderer.group.matrixAutoUpdate = false;
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
   inVR = true;
   controls.enabled = false;
 
-  // Position rig at starting location on Earth
-  positionVRRig(START_LAT, START_LON, START_ALT);
+  // Reset VR offset
+  vrOffset.set(0, 0, 0);
+  vrYaw.value = 0;
 
-  // Register XR camera with tiles renderer
+  // Position the tiles so Earth is around the user
+  updateTilesGroupForVR();
+
+  // Use XR camera for tile LOD
   const xrCamera = renderer.xr.getCamera();
   tilesRenderer.setCamera(xrCamera);
   tilesRenderer.setResolutionFromRenderer(xrCamera, renderer);
@@ -108,6 +130,13 @@ renderer.xr.addEventListener('sessionstart', () => {
 renderer.xr.addEventListener('sessionend', () => {
   inVR = false;
   controls.enabled = true;
+
+  // Restore tiles group transform
+  tilesRenderer.group.matrixAutoUpdate = true;
+  tilesRenderer.group.matrix.identity();
+  tilesRenderer.group.position.set(0, 0, 0);
+  tilesRenderer.group.rotation.set(0, 0, 0);
+  tilesRenderer.group.scale.set(1, 1, 1);
 
   // Restore desktop camera
   tilesRenderer.setCamera(camera);
@@ -122,36 +151,22 @@ function handleVRMovement() {
   for (const source of session.inputSources) {
     if (!source.gamepad) continue;
 
-    // Quest 2 thumbstick: axes[2] = X (left/right), axes[3] = Y (forward/back)
     const axes = source.gamepad.axes;
     const deadzone = 0.15;
 
-    let moveX = 0;
-    let moveY = 0;
-    let moveZ = 0;
-
     if (source.handedness === 'left') {
-      // Left stick: horizontal movement (strafe + forward/back)
-      if (Math.abs(axes[2]) > deadzone) moveX = axes[2] * flySpeed;
-      if (Math.abs(axes[3]) > deadzone) moveZ = -axes[3] * flySpeed;
+      // Left stick: forward/back (Z) and strafe (X)
+      if (Math.abs(axes[2]) > deadzone) vrOffset.x += axes[2] * flySpeed;
+      if (Math.abs(axes[3]) > deadzone) vrOffset.z += axes[3] * flySpeed;
     } else if (source.handedness === 'right') {
-      // Right stick: vertical movement (up/down) + rotation
-      if (Math.abs(axes[3]) > deadzone) moveY = -axes[3] * flySpeed;
-      if (Math.abs(axes[2]) > deadzone) {
-        vrRig.rotateOnWorldAxis(
-          new THREE.Vector3(0, 1, 0).applyQuaternion(vrRig.quaternion).normalize(),
-          -axes[2] * 0.02
-        );
-      }
-    }
-
-    if (moveX !== 0 || moveY !== 0 || moveZ !== 0) {
-      // Move relative to the rig's orientation
-      const movement = new THREE.Vector3(moveX, moveY, moveZ);
-      movement.applyQuaternion(vrRig.quaternion);
-      vrRig.position.add(movement);
+      // Right stick Y: up/down
+      if (Math.abs(axes[3]) > deadzone) vrOffset.y -= axes[3] * flySpeed;
+      // Right stick X: yaw rotation
+      if (Math.abs(axes[2]) > deadzone) vrYaw.value += axes[2] * 0.02;
     }
   }
+
+  updateTilesGroupForVR();
 }
 
 // --- Handle resize ---
