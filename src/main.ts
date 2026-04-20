@@ -24,10 +24,26 @@ import {
   Vector3,
   RingGeometry,
   Sphere,
+  Quaternion,
 } from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
-import { TilesRenderer, Scheduler } from '3d-tiles-renderer';
+import { TilesRenderer, Scheduler, WGS84_ELLIPSOID } from '3d-tiles-renderer';
+import {
+  CesiumIonAuthPlugin,
+  TileCompressionPlugin,
+  GLTFExtensionsPlugin,
+  TilesFadePlugin,
+} from '3d-tiles-renderer/plugins';
+
+const CESIUM_ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
+const DEG2RAD = Math.PI / 180;
+
+// Start location: Kuala Lumpur, 500m up
+const START_LAT = 3.1398 * DEG2RAD;
+const START_LON = 101.6878 * DEG2RAD;
+const START_ALT = 500;
 
 let camera: PerspectiveCamera,
   scene: Scene,
@@ -69,8 +85,8 @@ function init() {
   camera = new PerspectiveCamera(
     60,
     window.innerWidth / window.innerHeight,
-    0.1,
-    4000
+    1,
+    1e8
   );
   camera.position.set(0, 1, 0);
   workspace.add(camera);
@@ -85,21 +101,38 @@ function init() {
   box = new Box3();
   sphere = new Sphere();
 
+  // offsetParent: transforms ECEF so our start location is at scene origin with Y-up
   offsetParent = new Group();
-  offsetParent.rotation.x = Math.PI / 2;
-  offsetParent.position.y = 32;
   scene.add(offsetParent);
 
-  tiles = new TilesRenderer(
-    'https://raw.githubusercontent.com/NASA-AMMOS/3DTilesSampleData/master/msl-dingo-gap/0528_0260184_to_s64o256_colorize/scene-tileset.json'
-  );
+  // Compute ECEF position and surface normal for start location
+  const startECEF = new Vector3();
+  WGS84_ELLIPSOID.getCartographicToPosition(START_LAT, START_LON, START_ALT, startECEF);
+  const surfaceNormal = new Vector3().copy(startECEF).normalize();
+  const alignQuat = new Quaternion().setFromUnitVectors(surfaceNormal, new Vector3(0, 1, 0));
+
+  offsetParent.quaternion.copy(alignQuat);
+  const rotatedStart = new Vector3().copy(startECEF).applyQuaternion(alignQuat);
+  offsetParent.position.copy(rotatedStart).negate();
+
+  tiles = new TilesRenderer();
+
+  const dracoLoader = new DRACOLoader();
+  dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+
+  tiles.registerPlugin(new CesiumIonAuthPlugin({
+    apiToken: CESIUM_ION_TOKEN,
+    assetId: '2275207',
+    autoRefreshToken: true,
+  }));
+  tiles.registerPlugin(new GLTFExtensionsPlugin({ dracoLoader }));
+  tiles.registerPlugin(new TileCompressionPlugin());
+  tiles.registerPlugin(new TilesFadePlugin());
+
   offsetParent.add(tiles.group);
 
   tiles.setCamera(camera);
   tiles.setResolutionFromRenderer(camera, renderer);
-
-  tiles.lruCache.maxSize = 1200;
-  tiles.lruCache.minSize = 900;
 
   raycaster = new Raycaster();
   fwdVector = new Vector3(0, 0, 1);
@@ -219,13 +252,8 @@ function handleCamera() {
 function animate() {
   grid.visible = true;
 
-  if (tiles.getBoundingBox(box)) {
-    box.getCenter(tiles.group.position);
-    tiles.group.position.multiplyScalar(-1);
-  } else if (tiles.getBoundingSphere(sphere)) {
-    tiles.group.position.copy(sphere.center);
-    tiles.group.position.multiplyScalar(-1);
-  }
+  // For Earth tiles, the bounding center is at (0,0,0) = Earth center.
+  // offsetParent handles the transform to bring our start location to origin.
 
   handleCamera();
 
