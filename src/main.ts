@@ -18,7 +18,7 @@ const CESIUM_ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setClearColor(0x000011);
+renderer.setClearColor(0x87ceeb);
 document.body.appendChild(renderer.domElement);
 
 // --- Scene ---
