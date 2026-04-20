@@ -53,8 +53,11 @@ npm run preview
 
 1. Open **Meta Browser** on your Quest 2
 2. Navigate to `https://uzma-geospatial-ai.github.io/WebVR/`
-3. Click **"Enter VR"**
-4. Fly through terrain
+3. Click **FULLSCREEN**
+4. Use controller thumbsticks to fly around the globe
+   - **Left stick**: orbit/pan around the globe
+   - **Right stick Y**: zoom in/out
+   - **Right stick X**: rotate view
 
 ## Key Constraints
 
