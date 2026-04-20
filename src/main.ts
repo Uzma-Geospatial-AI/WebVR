@@ -1,7 +1,12 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { TilesRenderer, GlobeControls, WGS84_ELLIPSOID } from '3d-tiles-renderer';
+import {
+  TilesRenderer,
+  GlobeControls,
+  WGS84_ELLIPSOID,
+  Scheduler,
+} from '3d-tiles-renderer';
 import {
   CesiumIonAuthPlugin,
   TileCompressionPlugin,
@@ -23,7 +28,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType('local-floor');
-renderer.setClearColor(0x000000);
+renderer.setClearColor(0x87ceeb);
 document.body.appendChild(renderer.domElement);
 document.body.appendChild(VRButton.createButton(renderer));
 
@@ -61,8 +66,7 @@ tilesRenderer.registerPlugin(new GLTFExtensionsPlugin({ dracoLoader }));
 tilesRenderer.registerPlugin(new TileCompressionPlugin());
 tilesRenderer.registerPlugin(new TilesFadePlugin());
 
-// Wrapper group: we transform THIS for VR, leaving tilesRenderer.group untouched
-// so the library can manage its own internal transforms
+// Wrapper group for VR transforms (don't touch tilesRenderer.group directly)
 const vrContainer = new THREE.Group();
 vrContainer.add(tilesRenderer.group);
 scene.add(vrContainer);
@@ -75,32 +79,33 @@ const controls = new GlobeControls(scene, camera, renderer.domElement, tilesRend
 
 // --- VR ---
 let inVR = false;
+let xrSession: XRSession | null = null;
 const flySpeed = 20;
 
 // ECEF position of start location
 const startECEF = new THREE.Vector3();
 WGS84_ELLIPSOID.getCartographicToPosition(START_LAT, START_LON, START_ALT, startECEF);
 
-// Surface normal at start = "up" on Earth
+// Surface normal = "up" on Earth at that point
 const surfaceNormal = startECEF.clone().normalize();
 
-// Rotation: align surface normal with VR Y-up
-const alignQuat = new THREE.Quaternion().setFromUnitVectors(surfaceNormal, new THREE.Vector3(0, 1, 0));
+// Rotation to align surface normal with VR Y-up
+const alignQuat = new THREE.Quaternion().setFromUnitVectors(
+  surfaceNormal,
+  new THREE.Vector3(0, 1, 0)
+);
 
 // User movement
 const vrUserOffset = new THREE.Vector3();
 let vrYaw = 0;
 
 function updateVRContainer() {
-  // Combine alignment rotation with user yaw
   const yawQuat = new THREE.Quaternion().setFromAxisAngle(
     new THREE.Vector3(0, 1, 0), -vrYaw
   );
   const totalQuat = yawQuat.multiply(alignQuat);
 
   vrContainer.quaternion.copy(totalQuat);
-
-  // Position: rotate startECEF by totalQuat, negate it, then subtract user offset
   vrContainer.position.copy(startECEF).applyQuaternion(totalQuat).negate();
   vrContainer.position.sub(vrUserOffset);
 }
@@ -113,21 +118,41 @@ renderer.xr.addEventListener('sessionstart', () => {
   vrYaw = 0;
   updateVRContainer();
 
+  // CRITICAL: Switch tile scheduler to XR session's requestAnimationFrame
+  // Without this, tiles never load/update during VR
+  xrSession = renderer.xr.getSession();
+  if (xrSession) {
+    Scheduler.setXRSession(xrSession);
+  }
+
+  // Switch to XR camera: delete old camera first, then set XR camera
   const xrCamera = renderer.xr.getCamera();
+  tilesRenderer.cameras.forEach((c: THREE.Camera) => tilesRenderer.deleteCamera(c));
   tilesRenderer.setCamera(xrCamera);
-  tilesRenderer.setResolutionFromRenderer(xrCamera, renderer);
+
+  // Set resolution from XR eye viewport (not canvas size)
+  const leftCam = xrCamera.cameras[0];
+  if (leftCam) {
+    tilesRenderer.setResolution(xrCamera, leftCam.viewport.z, leftCam.viewport.w);
+  }
 });
 
 renderer.xr.addEventListener('sessionend', () => {
   inVR = false;
   controls.enabled = true;
 
+  // Reset scheduler back to window.requestAnimationFrame
+  Scheduler.setXRSession(null as unknown as XRSession);
+  xrSession = null;
+
+  // Restore desktop camera
+  tilesRenderer.cameras.forEach((c: THREE.Camera) => tilesRenderer.deleteCamera(c));
+  tilesRenderer.setCamera(camera);
+  tilesRenderer.setResolutionFromRenderer(camera, renderer);
+
   // Reset container
   vrContainer.position.set(0, 0, 0);
   vrContainer.quaternion.identity();
-
-  tilesRenderer.setCamera(camera);
-  tilesRenderer.setResolutionFromRenderer(camera, renderer);
 });
 
 function handleVRMovement() {
@@ -166,7 +191,12 @@ renderer.setAnimationLoop(() => {
     handleVRMovement();
     const xrCamera = renderer.xr.getCamera();
     xrCamera.updateMatrixWorld();
-    tilesRenderer.setResolutionFromRenderer(xrCamera, renderer);
+
+    // Re-set resolution each frame (viewport may not be ready on first frame)
+    const leftCam = xrCamera.cameras[0];
+    if (leftCam && leftCam.viewport) {
+      tilesRenderer.setResolution(xrCamera, leftCam.viewport.z, leftCam.viewport.w);
+    }
   } else {
     controls.update();
     camera.updateMatrixWorld();
