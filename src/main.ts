@@ -120,7 +120,7 @@ function handleControllers(delta: number): void {
   }
 }
 
-// ─── RESIZEE ──────────────────────────────────────────────────────────────────
+// ─── RESIZE ──────────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
